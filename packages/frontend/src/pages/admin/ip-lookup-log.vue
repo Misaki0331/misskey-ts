@@ -4,9 +4,19 @@ SPDX-License-Identifier: AGPL-3.0-only
 -->
 
 <!--
-	mk-go: IP lookup audit history (#3106 / #3276).
-	This component is mounted only from the authorized moderation-log tab. The
-	server remains the source of truth for moderator, policy, and API-scope checks.
+	mk-go: IP 照会の監査記録を読む画面 (#3106 / 親 #3066 / #3276)。
+
+	IP とアカウントの対応は機密性の高いモデレーション情報なので、**照会そのものを
+	記録する**。ここはそれを読む側。
+
+	**この画面自体が機密。** 照会に使った IP がそのまま並ぶので、照会と同じ 3 段の
+	権限 (moderator + canSearchIpHistory + read:admin:user-ips) で守られている。
+	コンポーネントは権限を確認したモデレーションログのタブからだけ mount するが、
+	権限と API scope の最終判定はサーバー側で行う。
+
+	**記録されるのは照会の事実だけで、結果は残っていない。** 「何件返したか」は
+	あるが「誰が候補に出たか」は無い — 記録すると、この表が第 2 の「IP とアカウント
+	の対応」になるため。
 -->
 <template>
 <div class="_gaps_m">
@@ -17,7 +27,16 @@ SPDX-License-Identifier: AGPL-3.0-only
 	<div v-if="loading" :class="$style.placeholder"><MkLoading/></div>
 
 	<template v-else-if="result">
+		<!--
+			**保持期間はサーバーが教える。** 画面で決め打ちすると、サーバーが
+			変えたときに黙って嘘になる。
+		-->
 		<MkInfo>{{ i18n.tsx._mkgoIpLookupLog.retentionNote({ n: result.retentionDays }) }}</MkInfo>
+		<!--
+			**「照会されていない」とは書かない。** 記録が空でも、保持期間を
+			過ぎて消えたのか一度も引かれていないのかは、この応答からは
+			区別できない (#2792 と同じ形の言い過ぎを避ける)。
+		-->
 		<MkInfo v-if="entries.length === 0">{{ i18n.tsx._mkgoIpLookupLog.empty({ n: result.retentionDays }) }}</MkInfo>
 
 		<div v-else class="_gaps_s">
@@ -26,46 +45,62 @@ SPDX-License-Identifier: AGPL-3.0-only
 					<MkAvatar v-if="event.user" :user="event.user" style="width: 26px; height: 26px;"/>
 					<i v-else class="ti ti-user-off"></i>
 				</template>
-				<template #right="{ event: entry }">
-					<MkFolder :key="entry.id">
-						<template #label>{{ kindLabel(entry.kind) }}</template>
-						<template #caption><MkTime :time="entry.createdAt" mode="detail"/></template>
+				<template #right="{ event: e }">
+					<MkFolder :key="e.id">
+						<template #label>{{ kindLabel(e.kind) }}</template>
+						<template #caption><MkTime :time="e.createdAt" mode="detail"/></template>
 
-						<MkA v-if="entry.user" :to="`/admin/user/${entry.user.id}`" :class="$style.card">
-							<MkUserCardMini :user="entry.user" :withChart="false"/>
+						<!--
+							**照会した人を引けないことがある。** `ip_lookup_log.userId`
+							に FK は無いので、退会しても記録は残る (監査の目的からして
+							残すのが正しい)。引けないときは id だけ出す。
+						-->
+						<MkA v-if="e.user" :to="`/admin/user/${e.user.id}`" :class="$style.card">
+							<MkUserCardMini :user="e.user" :withChart="false"/>
 						</MkA>
 						<div v-else :class="$style.goneUser">
 							{{ i18n.ts._mkgoIpLookupLog.userGone }}
-							<span class="_monospace">{{ entry.userId }}</span>
+							<span class="_monospace">{{ e.userId }}</span>
 						</div>
 
 						<div :class="$style.facts">
 							<MkKeyValue oneline>
 								<template #key>{{ i18n.ts._mkgoIpLookupLog.at }}</template>
-								<template #value><MkTime :time="entry.createdAt" mode="detail"/></template>
+								<template #value><MkTime :time="e.createdAt" mode="detail"/></template>
 							</MkKeyValue>
 							<MkKeyValue oneline>
 								<template #key>{{ i18n.ts._mkgoIpLookupLog.kind }}</template>
-								<template #value>{{ kindLabel(entry.kind) }}</template>
+								<template #value>{{ kindLabel(e.kind) }}</template>
 							</MkKeyValue>
+							<!--
+								**起点は種類で出し分ける。** IP 起点なら IP、利用者
+								起点なら対象の利用者。両方の欄を常に出すと、空のほうを
+								「記録が欠けている」と読ませる。
+							-->
 							<MkKeyValue oneline>
 								<template #key>{{ i18n.ts._mkgoIpLookupLog.subject }}</template>
 								<template #value>
-									<span v-if="entry.kind === 'ip'" class="_monospace">{{ entry.ip }}</span>
-									<MkA v-else-if="entry.targetUser" :to="`/admin/user/${entry.targetUser.id}`">@{{ entry.targetUser.username }}</MkA>
-									<span v-else class="_monospace">{{ entry.targetUserId }}</span>
+									<span v-if="e.kind === 'ip'" class="_monospace">{{ e.ip }}</span>
+									<MkA v-else-if="e.targetUser" :to="`/admin/user/${e.targetUser.id}`">@{{ e.targetUser.username }}</MkA>
+									<span v-else class="_monospace">{{ e.targetUserId }}</span>
 								</template>
 							</MkKeyValue>
+							<!--
+								**期間を取らない照会がある。** upstream の
+								`admin/get-user-ips` は窓ではなく最新 30 件を返すので
+								`sinceDays` が 0 になる。そのまま出すと「直近 0 日」という
+								存在しない条件を表示する。
+							-->
 							<MkKeyValue oneline>
 								<template #key>{{ i18n.ts._mkgoIpLookupLog.period }}</template>
 								<template #value>
-									<template v-if="entry.sinceDays > 0">{{ i18n.tsx._mkgoIpLookupLog.periodDays({ n: entry.sinceDays }) }}</template>
+									<template v-if="e.sinceDays > 0">{{ i18n.tsx._mkgoIpLookupLog.periodDays({ n: e.sinceDays }) }}</template>
 									<template v-else>{{ i18n.ts._mkgoIpLookupLog.noPeriod }}</template>
 								</template>
 							</MkKeyValue>
 							<MkKeyValue oneline>
 								<template #key>{{ i18n.ts._mkgoIpLookupLog.resultCount }}</template>
-								<template #value>{{ i18n.tsx._mkgoIpLookupLog.resultCountValue({ n: number(entry.resultCount) }) }}</template>
+								<template #value>{{ i18n.tsx._mkgoIpLookupLog.resultCountValue({ n: number(e.resultCount) }) }}</template>
 							</MkKeyValue>
 						</div>
 					</MkFolder>
@@ -115,6 +150,7 @@ type IPLookupLogResponse = {
 	entries: IPLookupLogEntry[];
 };
 
+// mk-go 独自のエンドポイントなので misskey-js の型集合には無い (ip-search.vue と同じ cast)。
 function api<T>(endpoint: string, params: Record<string, unknown> = {}): Promise<T> {
 	return misskeyApi(endpoint as never, params as never) as unknown as Promise<T>;
 }
@@ -122,15 +158,19 @@ function api<T>(endpoint: string, params: Record<string, unknown> = {}): Promise
 const loading = ref(true);
 const loadingMore = ref(false);
 const error = ref<string | null>(null);
+// 失敗がページング由来かどうか。「さらに表示」は一覧の末尾にあるので、そこでの
+// 失敗を画面の最上部に出すと視界の外で消える (ip-search.vue と同じ理由)。
 const errorWhilePaging = ref(false);
 const result = ref<IPLookupLogResponse | null>(null);
 const entries = ref<IPLookupLogEntry[]>([]);
-const timeline = computed(() => entries.value.map(entry => ({
-	id: entry.id,
-	timestamp: new Date(entry.createdAt).getTime(),
-	data: entry,
+const timeline = computed(() => entries.value.map(e => ({
+	id: e.id,
+	timestamp: new Date(e.createdAt).getTime(),
+	data: e,
 })));
 
+// **世代で古い応答を捨てる。** 「さらに表示」の最中でも再読み込みは掛けられるので、
+// 捨てないと別の取得の offset を継ぎ足して以降の記録が出てこなくなる。
 let generation = 0;
 
 async function load(offset: number) {
@@ -145,17 +185,22 @@ async function load(offset: number) {
 		loadingMore.value = true;
 	}
 	try {
-		const response = await api<IPLookupLogResponse>('admin/ip/lookup-log', { offset });
+		const res = await api<IPLookupLogResponse>('admin/ip/lookup-log', { offset });
 		if (gen !== generation) return;
-		result.value = response;
-		entries.value = first ? response.entries : mergeEntries(entries.value, response.entries);
-	} catch (reason) {
+		result.value = res;
+		// **追記のときは id で重複を落とす。** offset ページングなので、ページを
+		// 送る間に新しい照会が入ると行が後ろへずれ、直前のページの末尾が次の
+		// ページの先頭に再登場しうる (Vue の duplicate key にもなる)。
+		entries.value = first ? res.entries : mergeEntries(entries.value, res.entries);
+	} catch (err) {
 		if (gen !== generation) return;
+		// **前回の結果を消す。** 残したまま失敗だけ添えると、古い一覧を今回の
+		// 取得結果として読ませることになる。
 		if (first) {
 			result.value = null;
 			entries.value = [];
 		}
-		error.value = errorMessage(reason);
+		error.value = errorMessage(err);
 		errorWhilePaging.value = !first;
 	} finally {
 		if (gen === generation) {
@@ -165,17 +210,29 @@ async function load(offset: number) {
 	}
 }
 
-function errorMessage(reason: unknown): string {
-	const kind = ipSearchErrorKind(reason, false);
+/**
+ * 分類は ip-search と共有する。**`first` は常に false** — この画面は利用者の
+ * 入力を取らないので、`INVALID_PARAM` を「IP が読めない」に写すと、入力欄の
+ * 無い画面で入力を直せと言うことになる。
+ *
+ * **`pagingLimit` の文面だけは共有しない。** 共有側は「対象期間を絞ってください」
+ * と言うが、この画面に期間の指定は無い (当たるのは offset の上限だけ)。
+ */
+function errorMessage(err: unknown): string {
+	const kind = ipSearchErrorKind(err, false);
 	if (kind === 'pagingLimit') return i18n.ts._mkgoIpLookupLog.pagingLimit;
 	return i18n.ts._mkgoIpSearch[kind];
 }
 
 function mergeEntries(current: IPLookupLogEntry[], incoming: IPLookupLogEntry[]): IPLookupLogEntry[] {
-	const seen = new Set(current.map(entry => entry.id));
-	return [...current, ...incoming.filter(entry => !seen.has(entry.id))];
+	const seen = new Set(current.map(e => e.id));
+	return [...current, ...incoming.filter(e => !seen.has(e.id))];
 }
 
+/**
+ * **enum を直接 index しない。** サーバーが種類を足したときに `undefined` を
+ * 描かないよう、知らない値はそのまま出す (#3105 で同じ形を踏んだ)。
+ */
 function kindLabel(kind: string): string {
 	switch (kind) {
 		case 'ip': return i18n.ts._mkgoIpLookupLog.kindIp;
@@ -208,6 +265,7 @@ onMounted(() => load(0));
 	text-align: center;
 }
 
+/* 読み上げ専用。見た目には出さないが display:none にすると読まれない。 */
 .status {
 	position: absolute;
 	width: 1px;

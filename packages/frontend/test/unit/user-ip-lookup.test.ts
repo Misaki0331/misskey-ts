@@ -96,10 +96,79 @@ describe('createLazyUserIpLookup', () => {
 		expect(fetcher).toHaveBeenNthCalledWith(2, 'user-b');
 	});
 
-	test('失敗を保持し、自動再試行せず、明示的な再試行を許す', async () => {
+	test('同じユーザーでresetしても古い応答を捨てる', async () => {
+		const first = deferred<string[]>();
+		const second = deferred<string[]>();
+		const fetcher = vi.fn()
+			.mockReturnValueOnce(first.promise)
+			.mockReturnValueOnce(second.promise);
+		const lookup = createLazyUserIpLookup('user-a', fetcher);
+
+		const oldRequest = lookup.load();
+		lookup.reset('user-a');
+		const newRequest = lookup.load();
+
+		first.resolve(['old']);
+		await oldRequest;
+		expect(lookup.status.value).toBe('loading');
+		expect(lookup.value.value).toBe(null);
+
+		second.resolve(['new']);
+		await newRequest;
+		expect(lookup.status.value).toBe('loaded');
+		expect(lookup.value.value).toEqual(['new']);
+	});
+
+	test('古いリクエストの失敗を新しいユーザーの状態へ反映しない', async () => {
+		const first = deferred<string[]>();
+		const second = deferred<string[]>();
+		const fetcher = vi.fn((userId: string) => userId === 'user-a' ? first.promise : second.promise);
+		const lookup = createLazyUserIpLookup('user-a', fetcher);
+
+		const oldRequest = lookup.load();
+		lookup.reset('user-b');
+		const newRequest = lookup.load();
+
+		const oldError = new Error('old request failed');
+		first.reject(oldError);
+		await oldRequest;
+		expect(lookup.status.value).toBe('loading');
+		expect(lookup.error.value).toBe(null);
+
+		second.resolve(['new']);
+		await newRequest;
+		expect(lookup.status.value).toBe('loaded');
+		expect(lookup.value.value).toEqual(['new']);
+	});
+
+	test('古いリクエストの完了後も3回目は進行中のリクエストを共有する', async () => {
+		const first = deferred<string[]>();
+		const second = deferred<string[]>();
+		const fetcher = vi.fn()
+			.mockReturnValueOnce(first.promise)
+			.mockReturnValueOnce(second.promise);
+		const lookup = createLazyUserIpLookup('user-a', fetcher);
+
+		const oldRequest = lookup.load();
+		lookup.reset('user-b');
+		const currentRequest = lookup.load();
+
+		first.resolve(['old']);
+		await oldRequest;
+		const thirdRequest = lookup.load();
+
+		expect(thirdRequest).toBe(currentRequest);
+		expect(fetcher).toHaveBeenCalledTimes(2);
+
+		second.resolve(['new']);
+		await thirdRequest;
+		expect(lookup.value.value).toEqual(['new']);
+	});
+
+	test('同期的な失敗を保持し、明示的な再試行を許す', async () => {
 		const error = new Error('unavailable');
 		const fetcher = vi.fn()
-			.mockRejectedValueOnce(error)
+			.mockImplementationOnce(() => { throw error; })
 			.mockResolvedValueOnce(['loaded']);
 		const lookup = createLazyUserIpLookup('user-a', fetcher);
 

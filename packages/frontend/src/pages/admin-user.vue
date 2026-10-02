@@ -354,10 +354,10 @@ const announcementsPaginator = markRaw(new Paginator('admin/announcements/list',
 }));
 const expandedRoleIds = ref<(typeof info.value.roles[number]['id'])[]>([]);
 
-function _fetch_(userId = props.userId) {
+function _fetch_() {
 	return Promise.all([misskeyApi('users/show', {
-		userId,
-	}), misskeyApi('admin/show-user', adminShowUserParams(userId, mkGoVersion))]).then(([_user, _info]) => ({
+		userId: props.userId,
+	}), misskeyApi('admin/show-user', adminShowUserParams(props.userId, mkGoVersion))]).then(([_user, _info]) => ({
 		user: _user,
 		info: _info,
 	}));
@@ -373,19 +373,13 @@ function retryUserIps(): void {
 	void ipLookup.retry();
 }
 
-watch(() => props.userId, userId => {
-	ipLookup.reset(userId);
-	void refreshUser(userId);
-});
-
 watch(moderationNote, async () => {
 	await misskeyApi('admin/update-user-note', { userId: user.value.id, text: moderationNote.value });
 	await refreshUser();
 });
 
-async function refreshUser(userId = props.userId) {
-	const result = await _fetch_(userId);
-	if (userId !== props.userId) return;
+async function refreshUser() {
+	const result = await _fetch_();
 	user.value = result.user;
 	info.value = result.info;
 	moderator.value = info.value.isModerator;
